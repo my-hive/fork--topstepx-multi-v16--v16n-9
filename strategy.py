@@ -1,27 +1,37 @@
-"""Causal baseline, optional symbols. No requirement to manufacture market diversity.
-Slow 20-bar momentum, entries after 10:00 CT, flat at 14:00. Not claimed profitable.
-"""
+"""GC cash-settlement gap fade: overnight displacement from prior 15:00 CT cash close
+mean-reverts after Comex liquidity arrives. Each day's gap uses only prior completed session."""
 import numpy as np
 
+FAMILY = "metals-cash-gap-reversion"
+PARAMS = {"gap_dollars": 8.0, "entry_ct_sec": 30600, "exit_ct_sec": 37800, "stop_dollars": 250}
+BASKET = ("GC",)
 
 def entry_risk(panel):
-    return {symbol: np.zeros(len(df)) for symbol, df in panel.items()}
-
+    return {s: np.full(len(df), PARAMS["stop_dollars"], dtype=float) for s, df in panel.items()}
 
 def signals(panel):
-    result = {}
+    targets = {}
     for symbol, df in panel.items():
         out = np.zeros(len(df), dtype=np.int64)
-        # Two micros only, at most 0.2 standard equivalents total.
-        if symbol not in ('MES', 'MGC'):
-            result[symbol] = out
-            continue
-        for indices in df.groupby('session', sort=False).indices.values():
-            close = df.close.to_numpy()[indices]
-            sec = df.ct_sec.to_numpy()[indices]
-            # Rolling mean excludes future rows; warmup restarts each session.
-            for j in range(20, len(indices)):
-                if 36000 <= sec[j] < 50400:
-                    out[indices[j]] = int(np.sign(close[j] - close[j-20:j].mean()))
-        result[symbol] = out
-    return result
+        if symbol in BASKET:
+            session = df.session.astype(str).to_numpy()
+            sec = df.ct_sec.to_numpy()
+            close = df.close.to_numpy()
+            prior_cash = {}
+            for day in np.unique(session):
+                idx = np.flatnonzero(session == day)
+                past = idx[sec[idx] < PARAMS["entry_ct_sec"]]
+                if len(past):
+                    prev = past[-1]
+                    # cash reference is final completed 15:00 CT bar from preceding session.
+                    old = np.flatnonzero(sec[:idx[0]] < PARAMS["exit_ct_sec"])
+                    if len(old):
+                        prior_cash[day] = close[old[-1]]
+            for day, ref in prior_cash.items():
+                idx = np.flatnonzero((session == day) & (sec >= PARAMS["entry_ct_sec"]) & (sec < PARAMS["exit_ct_sec"]))
+                if len(idx):
+                    gap = close[idx[0]] - ref
+                    if abs(gap) >= PARAMS["gap_dollars"]:
+                        out[idx] = -int(np.sign(gap))
+        targets[symbol] = out
+    return targets
